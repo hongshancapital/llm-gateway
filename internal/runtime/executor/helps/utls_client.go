@@ -163,22 +163,29 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 
 	utlsRT := newUtlsRoundTripper(proxyURL)
 
-	var standardTransport http.RoundTripper = &http.Transport{
+	standardTransport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
+	if err := http2.ConfigureTransport(standardTransport); err != nil {
+		log.Warnf("utls: failed to configure HTTP/2 for standard transport: %v", err)
+	}
+	var standardRT http.RoundTripper = standardTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
-			standardTransport = transport
+			if err := http2.ConfigureTransport(transport); err != nil {
+				log.Warnf("utls: failed to configure HTTP/2 for proxy transport: %v", err)
+			}
+			standardRT = transport
 		}
 	}
 
 	client := &http.Client{
 		Transport: &fallbackRoundTripper{
 			utls:     utlsRT,
-			fallback: standardTransport,
+			fallback: standardRT,
 		},
 	}
 	if timeout > 0 {
