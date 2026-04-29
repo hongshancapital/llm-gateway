@@ -106,6 +106,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+
+	// Pad reasoning_content on assistant messages for DeepSeek thinking-mode compatibility.
+	if helps.IsDeepSeekTarget(auth, baseModel) {
+		translated = helps.PadDeepSeekReasoningContent(translated)
+	}
+
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -210,6 +216,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+
+	// Pad reasoning_content on assistant messages for DeepSeek thinking-mode compatibility.
+	if helps.IsDeepSeekTarget(auth, baseModel) {
+		translated = helps.PadDeepSeekReasoningContent(translated)
+	}
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
