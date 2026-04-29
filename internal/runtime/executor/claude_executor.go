@@ -170,6 +170,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+	// For DeepSeek models, fill missing thinking blocks in assistant messages
+	// to prevent upstream rejection in thinking mode.
+	body = fillMissingThinkingBlocks(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
@@ -355,6 +358,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+	// For DeepSeek models, fill missing thinking blocks in assistant messages
+	// to prevent upstream rejection in thinking mode.
+	body = fillMissingThinkingBlocks(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
@@ -709,6 +715,62 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	}
 	body, _ = sjson.DeleteBytes(body, "betas")
 	return betas, body
+}
+
+// fillMissingThinkingBlocks ensures that for DeepSeek models in thinking mode,
+// every assistant message has at least one thinking block. DeepSeek rejects
+// requests where thinking mode is enabled but assistant messages lack thinking
+// blocks (error: "content[].thinking in the thinking mode must be passed back").
+// This is a client-compatibility fix: some clients strip thinking blocks from
+// message history.
+func fillMissingThinkingBlocks(body []byte) []byte {
+	// Only apply to DeepSeek models.
+	model := gjson.GetBytes(body, "model").String()
+	if !strings.Contains(strings.ToLower(model), "deepseek") {
+		return body
+	}
+	// If thinking is not configured, skip — DeepSeek won't be in thinking mode.
+	if !gjson.GetBytes(body, "thinking").Exists() {
+		return body
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+		if msg.Get("role").String() != "assistant" {
+			return true
+		}
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		// Check if this message already has a thinking block.
+		hasThinking := false
+		content.ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "thinking" {
+				hasThinking = true
+				return false
+			}
+			return true
+		})
+		if hasThinking {
+			return true
+		}
+		// Inject an empty thinking block at the start of this message's content.
+		path := fmt.Sprintf("messages.%d.content", msgIdx.Int())
+		current := content.Raw
+		newContent := `[{"type":"thinking","thinking":"","signature":""}`
+		if current != "[]" && current != "" {
+			newContent += "," + current[1:]
+		}
+		body, _ = sjson.SetRawBytes(body, path, []byte(newContent))
+		return true
+	})
+
+	return body
 }
 
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
