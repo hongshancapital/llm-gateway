@@ -476,6 +476,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			var totalUsage usage.Detail
 			for scanner.Scan() {
 				line := scanner.Bytes()
+				// Skip SSE comment lines (": keep-alive", ": heartbeat", etc.).
+				// These are server-side keep-alive pings that should not be forwarded
+				// to the client — some upstream proxies send them inline with real
+				// events, which causes the client SSE parser to misparse the stream.
+				if bytes.HasPrefix(line, []byte(":")) {
+					continue
+				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					totalUsage = mergeDetail(totalUsage, detail)
@@ -512,6 +519,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		var totalUsage usage.Detail
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			// Skip SSE comment lines (": keep-alive", ": heartbeat", etc.).
+			if bytes.HasPrefix(line, []byte(":")) {
+				continue
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				totalUsage = mergeDetail(totalUsage, detail)
