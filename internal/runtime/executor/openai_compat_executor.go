@@ -287,6 +287,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				continue
 			}
 
+			// Validate that the payload after "data:" is either [DONE] or a JSON object.
+			// This prevents non-standard SSE lines (e.g. wrapped keep-alives, event
+			// metadata, or malformed payloads) from leaking downstream.
+			payload := helps.JSONPayload(line)
+			if len(payload) == 0 {
+				if !bytes.Equal(bytes.TrimSpace(line[5:]), []byte("[DONE]")) {
+					continue
+				}
+			}
+
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 			// Pass through translator; it yields one or more chunks for the target schema.
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
