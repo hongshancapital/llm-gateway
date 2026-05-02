@@ -474,7 +474,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 				// Filter out non-standard SSE heartbeat/comment lines (e.g. ": keep-alive")
 				// while preserving empty lines (SSE event delimiters), event: and data: lines.
-				if len(line) > 0 && line[0] == ':' {
+				if len(line) == 0 {
+					continue
+				}
+				if line[0] == ':' {
 					continue
 				}
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
