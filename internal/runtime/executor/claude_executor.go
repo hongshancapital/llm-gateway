@@ -487,6 +487,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					totalUsage = mergeDetail(totalUsage, detail)
 				}
+				// Filter out non-standard SSE heartbeat/comment lines (e.g. ": keep-alive")
+				// while preserving empty lines (SSE event delimiters), event: and data: lines.
+				if len(line) == 0 {
+					continue
+				}
+				if line[0] == ':' {
+					continue
+				}
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 				}
@@ -526,6 +534,18 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				totalUsage = mergeDetail(totalUsage, detail)
+			}
+			// Filter out non-standard SSE lines before translation to prevent
+			// malformed or heartbeat-only chunks from leaking downstream.
+			trimmed := bytes.TrimSpace(line)
+			if len(trimmed) > 0 && trimmed[0] == ':' {
+				continue
+			}
+			if bytes.HasPrefix(trimmed, []byte("data:")) {
+				payload := bytes.TrimSpace(trimmed[5:])
+				if len(payload) == 0 || payload[0] != '{' {
+					continue
+				}
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
