@@ -477,23 +477,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				// Skip SSE comment lines (": keep-alive", ": heartbeat", etc.).
-				// These are server-side keep-alive pings that should not be forwarded
-				// to the client — some upstream proxies send them inline with real
-				// events, which causes the client SSE parser to misparse the stream.
-				if bytes.HasPrefix(line, []byte(":")) {
+				if len(line) > 0 && line[0] == ':' {
 					continue
 				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					totalUsage = mergeDetail(totalUsage, detail)
-				}
-				// Filter out non-standard SSE heartbeat/comment lines (e.g. ": keep-alive")
-				// while preserving empty lines (SSE event delimiters), event: and data: lines.
-				if len(line) == 0 {
-					continue
-				}
-				if line[0] == ':' {
-					continue
 				}
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -528,19 +517,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			// Skip SSE comment lines (": keep-alive", ": heartbeat", etc.).
-			if bytes.HasPrefix(line, []byte(":")) {
+			if len(line) > 0 && line[0] == ':' {
 				continue
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				totalUsage = mergeDetail(totalUsage, detail)
 			}
-			// Filter out non-standard SSE lines before translation to prevent
-			// malformed or heartbeat-only chunks from leaking downstream.
+			// Skip data: lines whose payload is empty or non-JSON before translation.
 			trimmed := bytes.TrimSpace(line)
-			if len(trimmed) > 0 && trimmed[0] == ':' {
-				continue
-			}
 			if bytes.HasPrefix(trimmed, []byte("data:")) {
 				payload := bytes.TrimSpace(trimmed[5:])
 				if len(payload) == 0 || payload[0] != '{' {

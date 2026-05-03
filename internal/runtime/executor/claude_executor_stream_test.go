@@ -88,17 +88,24 @@ func TestClaudeExecutorStream_PassthroughFiltersNonStandardSSE(t *testing.T) {
 		t.Fatalf("unexpected stream error: %v", streamErr)
 	}
 
-	// Expect exactly two valid JSON data lines forwarded (plus the trailing \n each carries).
-	if len(gotPayloads) != 2 {
-		t.Fatalf("got %d payloads, want 2; payloads: %v", len(gotPayloads), gotPayloads)
+	// Expect at least two valid JSON data lines forwarded.
+	// Empty line payloads (SSE event delimiters) may also be present.
+	var dataPayloads []string
+	for _, p := range gotPayloads {
+		if strings.HasPrefix(p, "data:") {
+			dataPayloads = append(dataPayloads, p)
+		}
+	}
+	if len(dataPayloads) != 2 {
+		t.Fatalf("got %d data payloads, want 2; payloads: %v", len(dataPayloads), dataPayloads)
 	}
 
 	for i, wantPrefix := range []string{
 		`data: {"type":"content_block_delta"`,
 		`data: {"type":"content_block_delta"`,
 	} {
-		if !bytes.HasPrefix([]byte(gotPayloads[i]), []byte(wantPrefix)) {
-			t.Fatalf("payload[%d] = %q, want prefix %q", i, gotPayloads[i], wantPrefix)
+		if !bytes.HasPrefix([]byte(dataPayloads[i]), []byte(wantPrefix)) {
+			t.Fatalf("payload[%d] = %q, want prefix %q", i, dataPayloads[i], wantPrefix)
 		}
 	}
 
