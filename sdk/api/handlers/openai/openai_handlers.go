@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
@@ -171,6 +173,86 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 		h.handleCompletionsNonStreamingResponse(c, rawJSON)
 	}
 
+}
+
+// Embeddings handles the /v1/embeddings endpoint.
+// For codex providers with a dedicated base URL, it routes directly to the
+// upstream /embeddings endpoint. Otherwise it falls back to the standard
+// OpenAI-compatible executor path.
+func (h *OpenAIAPIHandler) Embeddings(c *gin.Context) {
+	rawJSON, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+	if !json.Valid(rawJSON) {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Invalid request: body must be valid JSON",
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if modelName == "" {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Invalid request: model is required",
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	providers := util.GetProviderName(modelName)
+	hasCodexProvider := false
+	for _, p := range providers {
+		if strings.EqualFold(p, "codex") {
+			hasCodexProvider = true
+			break
+		}
+	}
+	if hasCodexProvider && h.AuthManager.HasAuthWithBaseURL("codex") {
+		h.executeDirectEmbedding(c, rawJSON, modelName)
+		return
+	}
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
+	out, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, "openai", modelName, rawJSON, "embeddings")
+	cliCancel()
+
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	c.Header("Content-Type", "application/json")
+	_, _ = c.Writer.Write(out)
+}
+
+// executeDirectEmbedding forwards embedding requests directly to the upstream
+// /embeddings endpoint via the codex executor, bypassing the chat completions path.
+func (h *OpenAIAPIHandler) executeDirectEmbedding(c *gin.Context, body []byte, modelName string) {
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
+	out, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, "codex", modelName, body, "embeddings")
+	cliCancel()
+
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	c.Header("Content-Type", "application/json")
+	_, _ = c.Writer.Write(out)
 }
 
 // convertCompletionsRequestToChatCompletions converts OpenAI completions API request to chat completions format.

@@ -151,6 +151,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
 	}
+	if opts.Alt == "embeddings" {
+		return e.executeEmbeddings(ctx, auth, req, opts)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
@@ -1160,6 +1163,86 @@ func (e *CodexExecutor) executeImagesGeneration(ctx context.Context, auth *clipr
 
 	// Return the raw API response to the client.
 	// The format matches the standard OpenAI /images/generations or /images/edits schema.
+	reporter.EnsurePublished(ctx)
+	resp = cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}
+	return resp, nil
+}
+
+// executeEmbeddings forwards embedding requests to the upstream /embeddings endpoint.
+// Supports both standard OpenAI and Azure OpenAI deployments.
+func (e *CodexExecutor) executeEmbeddings(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	apiKey, baseURL := codexCreds(auth)
+	if baseURL == "" {
+		return resp, statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL for embeddings"}
+	}
+
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), thinking.ParseSuffix(req.Model).ModelName, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	body := req.Payload
+	if len(body) == 0 {
+		body = opts.OriginalRequest
+	}
+	body, _ = sjson.SetBytes(body, "model", thinking.ParseSuffix(req.Model).ModelName)
+
+	path := "/embeddings"
+	url := strings.TrimSuffix(baseURL, "/")
+	if idx := strings.Index(url, "?"); idx >= 0 {
+		url = url[:idx] + path + url[idx:]
+	} else {
+		url += path
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return resp, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor embeddings: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		return resp, newCodexStatusErr(httpResp.StatusCode, b)
+	}
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
 	resp = cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}
 	return resp, nil
