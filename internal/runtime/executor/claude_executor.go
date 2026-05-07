@@ -469,17 +469,46 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}()
 
-		// If from == to (Claude → Claude), directly forward the SSE stream without translation
+		// If from == to (Claude → Claude), directly forward the SSE stream without translation.
+		// Buffer event: lines and only forward them when followed by data: lines.
+		// This drops orphan event: declarations caused by upstream proxies (e.g. litellm)
+		// inserting : keep-alive comments between event: and data:, which would otherwise
+		// cause downstream SDKs to JSON.parse("") → "Unexpected EOF".
+		// Per WHATWG SSE spec: events with no data field must not be dispatched.
 		if from == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			var totalUsage usage.Detail
+			var pendingEvent []byte // buffered event: line awaiting a data: follower
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				// Skip SSE comment lines (": keep-alive", ": heartbeat", etc.).
 				if len(line) > 0 && line[0] == ':' {
 					continue
 				}
+
+				trimmed := bytes.TrimSpace(line)
+
+				// Detect and buffer event: lines — don't forward yet.
+				if bytes.HasPrefix(trimmed, []byte("event:")) {
+					pendingEvent = bytes.Clone(line)
+					continue
+				}
+
+				// On data: line, forward the pending event first, then the data.
+				if bytes.HasPrefix(trimmed, []byte("data:")) {
+					if len(pendingEvent) > 0 {
+						cloned := make([]byte, len(pendingEvent)+1)
+						copy(cloned, pendingEvent)
+						cloned[len(pendingEvent)] = '\n'
+						out <- cliproxyexecutor.StreamChunk{Payload: cloned}
+						pendingEvent = nil
+					}
+				} else {
+					// Empty line or other non-data line: drop pending event (orphan).
+					pendingEvent = nil
+				}
+
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					totalUsage = mergeDetail(totalUsage, detail)

@@ -22,8 +22,15 @@ import (
 func TestClaudeExecutorStream_PassthroughFiltersNonStandardSSE(t *testing.T) {
 	upstreamLines := []string{
 		": keep-alive",
+		// Orphan event: line followed by : keep-alive instead of data: (litellm proxy bug).
+		// Must be dropped per WHATWG SSE spec — no data field means no dispatch.
+		"event: content_block_delta",
+		": keep-alive",
+		// Normal event+data pair must still pass through correctly.
+		"event: content_block_delta",
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
 		": ping",
+		"event: content_block_delta",
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" there"}}`,
 	}
 
@@ -114,6 +121,17 @@ func TestClaudeExecutorStream_PassthroughFiltersNonStandardSSE(t *testing.T) {
 		if strings.Contains(p, "keep-alive") {
 			t.Fatalf("non-standard SSE leaked into downstream: %q", p)
 		}
+	}
+
+	// Verify that only 2 event: lines were forwarded (the orphan was dropped).
+	var eventPayloads []string
+	for _, p := range gotPayloads {
+		if strings.HasPrefix(p, "event:") {
+			eventPayloads = append(eventPayloads, p)
+		}
+	}
+	if len(eventPayloads) != 2 {
+		t.Fatalf("got %d event payloads, want 2 (orphan should be dropped); payloads: %v", len(eventPayloads), eventPayloads)
 	}
 }
 
